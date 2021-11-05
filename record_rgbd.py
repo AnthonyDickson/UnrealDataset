@@ -103,7 +103,18 @@ def get_frame_data(interpolated_trajectory, frame_delay=1. / 30., client_url='lo
     return fov, frames
 
 
-def write_frame_data_to_disk(frames, output_path, max_depth=10.0, invalid_depth_value=0.0):
+def convert_to_depth_to_plane(depth_map, f):
+    h, w = depth_map.shape[:2]
+    i_c = float(h) / 2 - 1
+    j_c = float(w) / 2 - 1
+    columns, rows = np.meshgrid(np.linspace(0, w - 1, num=w), np.linspace(0, h - 1, num=h))
+    distance_from_center = ((rows - i_c) ** 2 + (columns - j_c) ** 2) ** 0.5
+    depth_map_plane = depth_map / (1 + (distance_from_center / f) ** 2) ** 0.5
+
+    return depth_map_plane
+
+
+def write_frame_data_to_disk(frames, output_path, focal_length, max_depth=10.0, invalid_depth_value=0.0):
     print(f"Writing frames to {output_path}...")
     color_dir = os.path.join(output_path, 'colour')
     depth_dir = os.path.join(output_path, 'depth')
@@ -116,6 +127,10 @@ def write_frame_data_to_disk(frames, output_path, max_depth=10.0, invalid_depth_
         color = np.ascontiguousarray(color)
 
         depth = read_npy(depth_map_buffer)
+        # UnrealCV reads depth as depth to the center of the camera, however using the depth maps as is results in
+        # warped surfaces. To get back straight walls etc. we need to convert the depth map to use depth values to the
+        # camera plane (Z-plane).
+        depth = convert_to_depth_to_plane(depth, focal_length)
         # Clip depth values.
         depth[depth > max_depth] = invalid_depth_value
         # Normalize to [0.0, 1.0]
@@ -133,7 +148,8 @@ def write_frame_data_to_disk(frames, output_path, max_depth=10.0, invalid_depth_
         imageio.imwrite(depth_path, depth)
 
 
-def main(trajectory, output_path, max_depth=10.0, invalid_depth_value=0.0, fps=30.0, client_url='localhost', client_port=8888):
+def main(trajectory, output_path, max_depth=10.0, invalid_depth_value=0.0, fps=30.0, client_url='localhost',
+         client_port=8888):
     os.makedirs(output_path)
 
     frame_delay = 1. / fps
@@ -151,12 +167,13 @@ def main(trajectory, output_path, max_depth=10.0, invalid_depth_value=0.0, fps=3
     translation_vectors = interpolated_trajectory[:, :3]
     rotation_vectors = Rotation.from_euler('xyz', interpolated_trajectory[:, 3:], degrees=True).as_rotvec()
     output_trajectory = np.hstack((rotation_vectors, translation_vectors))
+    # Unreal appears to use a left-handed, z-up coordinate system.
+    # The below converts this to a left-handed, y-up coordinate system.
+    output_trajectory = output_trajectory[:, [0, 1, 2, 3, 5, 4]]
 
     trajectory_output_file = os.path.join(output_path, 'trajectory.txt')
     print(f"Saving trajectory to {trajectory_output_file}...")
     np.savetxt(trajectory_output_file, output_trajectory)
-
-    write_frame_data_to_disk(frames, output_path, max_depth, invalid_depth_value)
 
     height, width = read_npy(frames[0][0]).shape[:2]
     cu, cv = width / 2, height / 2
@@ -165,6 +182,9 @@ def main(trajectory, output_path, max_depth=10.0, invalid_depth_value=0.0, fps=3
     K = np.array([[f, 0., cu],
                   [0., f, cv],
                   [0., 0., 1.]])
+
+    write_frame_data_to_disk(frames, output_path, f, max_depth, invalid_depth_value)
+
 
     camera_params_file = os.path.join(output_path, 'camera.txt')
     print(f"Saving camera intrinsics to {camera_params_file}...")
