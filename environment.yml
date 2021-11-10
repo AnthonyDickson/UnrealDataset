@@ -39,5 +39,6 @@ dependencies:
   - zlib=1.2.11=h62dcd97_4
   - zstd=1.4.9=h19a0ad4_0
   - pip:
+    - opencv-python==4.5.4.58
     - pynput==1.7.4
     - unrealcv==0.4.0

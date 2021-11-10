@@ -10,6 +10,8 @@ from scipy import interpolate
 from scipy.spatial.transform import Rotation
 from unrealcv import Client
 
+from UnrealDatasetInfo import UnrealDatasetInfo
+
 
 def read_trajectory(filename):
     with open(filename) as f:
@@ -114,11 +116,11 @@ def convert_to_depth_to_plane(depth_map, f):
     return depth_map_plane
 
 
-def write_frame_data_to_disk(frames, output_path, focal_length, max_depth=10.0, invalid_depth_value=0.0):
-    print(f"Writing frames to {output_path}...")
-    color_dir = os.path.join(output_path, 'colour')
-    depth_dir = os.path.join(output_path, 'depth')
-    os.makedirs(color_dir)
+def write_frame_data_to_disk(frames, colour_dir, depth_dir, focal_length, max_depth=10.0, invalid_depth_value=0.0,
+                             dtype=np.uint16):
+    assert dtype is np.uint8 or dtype is np.uint16
+
+    os.makedirs(colour_dir)
     os.makedirs(depth_dir)
 
     for i, (color_frame_buffer, depth_map_buffer) in enumerate(frames):
@@ -135,12 +137,12 @@ def write_frame_data_to_disk(frames, output_path, focal_length, max_depth=10.0, 
         depth[depth > max_depth] = invalid_depth_value
         # Normalize to [0.0, 1.0]
         depth /= max_depth
-        # Expand values to take up uint16 range and convert to uint16
-        depth = np.iinfo(np.uint16).max * depth
-        depth = depth.astype(np.uint16)
+        # Expand values to take up uint[8|16] range and convert to uint[8|16]
+        depth = np.iinfo(dtype).max * depth
+        depth = depth.astype(dtype)
 
         filename = f"{i:03,d}"
-        color_path = os.path.join(color_dir, f"{filename}.jpg")
+        color_path = os.path.join(colour_dir, f"{filename}.jpg")
         depth_path = os.path.join(depth_dir, f"{filename}.png")
 
         print(f"Saving color and depth frame {i + 1:03,d} of {len(frames):03,d} to: {color_path} AND {depth_path}...")
@@ -148,8 +150,9 @@ def write_frame_data_to_disk(frames, output_path, focal_length, max_depth=10.0, 
         imageio.imwrite(depth_path, depth)
 
 
-def main(trajectory, output_path, max_depth=10.0, invalid_depth_value=0.0, fps=30.0, client_url='localhost',
-         client_port=8888):
+def main(trajectory, output_path, client_url='localhost', client_port=8888, max_depth=10.0, invalid_depth_value=0.0,
+         is_16bit_depth=True, fps=30.0, intrinsics_filename='camera.txt', trajectory_filename='trajectory.txt',
+         colour_folder='colour', depth_folder='depth'):
     os.makedirs(output_path)
 
     frame_delay = 1. / fps
@@ -171,7 +174,7 @@ def main(trajectory, output_path, max_depth=10.0, invalid_depth_value=0.0, fps=3
     # The below converts this to a left-handed, y-up coordinate system.
     output_trajectory = output_trajectory[:, [0, 1, 2, 3, 5, 4]]
 
-    trajectory_output_file = os.path.join(output_path, 'trajectory.txt')
+    trajectory_output_file = os.path.join(output_path, trajectory_filename)
     print(f"Saving trajectory to {trajectory_output_file}...")
     np.savetxt(trajectory_output_file, output_trajectory)
 
@@ -183,12 +186,25 @@ def main(trajectory, output_path, max_depth=10.0, invalid_depth_value=0.0, fps=3
                   [0., f, cv],
                   [0., 0., 1.]])
 
-    write_frame_data_to_disk(frames, output_path, f, max_depth, invalid_depth_value)
+    print(f"Writing frames to {output_path}...")
+    colour_dir = os.path.join(output_path, colour_folder)
+    depth_dir = os.path.join(output_path, depth_folder)
+    depth_type = np.uint16 if is_16bit_depth else np.uint8
+    write_frame_data_to_disk(frames, colour_dir, depth_dir, f, max_depth, invalid_depth_value)
 
-
-    camera_params_file = os.path.join(output_path, 'camera.txt')
+    camera_params_file = os.path.join(output_path, intrinsics_filename)
     print(f"Saving camera intrinsics to {camera_params_file}...")
     np.savetxt(camera_params_file, K)
+
+    info = UnrealDatasetInfo(width=width, height=height, num_frames=len(frames), fps=fps, max_depth=max_depth,
+                             invalid_depth_value=invalid_depth_value, is_16bit_depth=is_16bit_depth,
+                             intrinsics_filename=intrinsics_filename, trajectory_filename=trajectory_filename,
+                             colour_folder=colour_folder, depth_folder=depth_folder)
+
+    info_file = os.path.join(output_path, 'info.json')
+    info.save_json(info_file)
+
+    print(f"Saved dataset info to {info_file}")
 
     print("Done.")
 
@@ -215,4 +231,4 @@ if __name__ == '__main__':
     client_url = args.client_url
     client_port = args.client_port
 
-    main(trajectory, output_path, max_depth, invalid_depth_value, fps, client_url, client_port)
+    main(trajectory, output_path, client_url, client_port, max_depth, invalid_depth_value, fps=fps)
