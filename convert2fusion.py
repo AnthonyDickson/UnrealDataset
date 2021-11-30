@@ -17,9 +17,11 @@ if __name__ == '__main__':
     base_path = os.path.abspath(args.base_path)
     output_path = os.path.abspath(args.output_path)
 
-    info = UnrealDatasetInfo.from_json(os.path.join(base_path, 'info.json'))
+    metadata_path = os.path.join(base_path, 'info.json')
+    info = UnrealDatasetInfo.from_json(metadata_path)
 
-    cam_intr = np.loadtxt(os.path.join(base_path, info.intrinsics_filename))
+    camera_intrinsics_path = os.path.join(base_path, info.intrinsics_filename)
+    cam_intr = np.loadtxt(camera_intrinsics_path)
     camera_trajectory = np.loadtxt(os.path.join(base_path, info.trajectory_filename))
 
     color_path = os.path.join(base_path, info.colour_folder)
@@ -70,3 +72,11 @@ m_frames.size = {info.num_frames}
 
     with open(os.path.join(output_path, "info.txt"), 'w') as f:
         f.writelines(info_txt)
+
+    metadata_output_path = os.path.join(output_path, 'info.json')
+    print(f"Copying info.json: {metadata_path} -> {metadata_output_path}")
+    shutil.copyfile(metadata_path, metadata_output_path)
+
+    intrinsics_output_path = os.path.join(output_path, "camera-intrinsics.txt")
+    print(f"Copying camera intrinsics: {camera_intrinsics_path} -> {intrinsics_output_path}")
+    shutil.copyfile(camera_intrinsics_path, intrinsics_output_path)
