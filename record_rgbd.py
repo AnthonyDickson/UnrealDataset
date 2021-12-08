@@ -168,11 +168,12 @@ def main(trajectory, output_path, client_url='localhost', client_port=8888, max_
     fov, frames = get_frame_data(interpolated_trajectory, frame_delay, client_url, client_port)
 
     translation_vectors = interpolated_trajectory[:, :3]
+    translation_vectors /= 100.0  # Translation units in Unreal is cm, convert it to meters to it's the same as depth.
     rotation_vectors = Rotation.from_euler('xyz', interpolated_trajectory[:, 3:], degrees=True).as_rotvec()
     output_trajectory = np.hstack((rotation_vectors, translation_vectors))
     # Unreal appears to use a left-handed, z-up coordinate system.
     # The below converts this to a left-handed, y-up coordinate system.
-    output_trajectory = output_trajectory[:, [0, 1, 2, 3, 5, 4]]
+    output_trajectory = output_trajectory[:, [0, 1, 2, 5, 3, 4]]
 
     trajectory_output_file = os.path.join(output_path, trajectory_filename)
     print(f"Saving trajectory to {trajectory_output_file}...")
@@ -189,7 +190,6 @@ def main(trajectory, output_path, client_url='localhost', client_port=8888, max_
     print(f"Writing frames to {output_path}...")
     colour_dir = os.path.join(output_path, colour_folder)
     depth_dir = os.path.join(output_path, depth_folder)
-    depth_type = np.uint16 if is_16bit_depth else np.uint8
     write_frame_data_to_disk(frames, colour_dir, depth_dir, f, max_depth, invalid_depth_value)
 
     camera_params_file = os.path.join(output_path, intrinsics_filename)

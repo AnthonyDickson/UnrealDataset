@@ -129,4 +129,4 @@ dmypy.json
 .pyre/
 
 data/
-camera-trajectory.json
+z_increasing.json
