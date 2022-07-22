@@ -5,7 +5,7 @@ dependencies:
   - blas=1.0=mkl
   - ca-certificates=2021.10.26=haa95532_2
   - certifi=2021.10.8=py39haa95532_0
-  - freetype=2.11.0=ha860e81_0
+  - freetype=2.10.4=hd328e21_0
   - icc_rt=2019.0.0=h0cc432a_1
   - imageio=2.9.0=pyhd3eb1b0_0
   - intel-openmp=2021.4.0=haa95532_3556

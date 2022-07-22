@@ -54,7 +54,7 @@ if __name__ == '__main__':
         np.savetxt(pose_output_path, pose_mat)
         print("Saved data for frame {:06d}...".format(i))
 
-    depth_scaling_factor = np.iinfo(np.uint16 if info.is_16bit_depth else np.uint8).max / info.max_depth
+    depth_scaling_factor = 1. / 1000.
 
     info_txt = f"""m_versionNumber = 4
 m_sensorName = UNREAL

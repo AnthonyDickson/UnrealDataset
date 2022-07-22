@@ -1,13 +1,17 @@
 import argparse
 import json
 import os
+import shutil
 import time
 from io import BytesIO
+from multiprocessing.pool import ThreadPool
+from typing import List
 
 import imageio
 import numpy as np
+from pynput import keyboard
 from scipy import interpolate
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Rotation, Slerp
 from unrealcv import Client
 
 from UnrealDatasetInfo import UnrealDatasetInfo
@@ -32,8 +36,10 @@ def read_npy(res):
     return np.load(BytesIO(res))
 
 
-def interpolate_poses(translation_vectors, rotation_vectors, frame_delay):
+def interpolate_poses(trajectory, frame_delay):
     frame_times = np.arange(0.0, len(trajectory) - 1, frame_delay)
+
+    translation_vectors, rotation_vectors = trajectory[:, :3], trajectory[:, 3:]
 
     translation_lerp = interpolate.interp1d(np.arange(len(translation_vectors)), translation_vectors, axis=0)
     interpolated_translations = translation_lerp(frame_times)
@@ -76,10 +82,7 @@ def interpolate_poses(translation_vectors, rotation_vectors, frame_delay):
     return interpolated_trajectory
 
 
-def get_frame_data(interpolated_trajectory, frame_delay=1. / 30., client_url='localhost', client_port=8888):
-    client = Client((client_url, client_port))
-    client.connect()
-
+def get_frame_data(client: Client, interpolated_trajectory, frame_delay=1. / 30.):
     frames = []
 
     for i, pose in enumerate(interpolated_trajectory):
@@ -100,8 +103,6 @@ def get_frame_data(interpolated_trajectory, frame_delay=1. / 30., client_url='lo
 
     fov = float(client.request('vget /camera/0/horizontal_fieldofview'))
 
-    client.disconnect()
-
     return fov, frames
 
 
@@ -117,13 +118,19 @@ def convert_to_depth_to_plane(depth_map, f):
 
 
 def write_frame_data_to_disk(frames, colour_dir, depth_dir, focal_length, max_depth=10.0, invalid_depth_value=0.0,
-                             dtype=np.uint16):
-    assert dtype is np.uint8 or dtype is np.uint16
+                             overwrite_ok=False):
+    if overwrite_ok:
+        if os.path.exists(colour_dir):
+            shutil.rmtree(colour_dir)
+
+        if os.path.exists(depth_dir):
+            shutil.rmtree(depth_dir)
 
     os.makedirs(colour_dir)
     os.makedirs(depth_dir)
 
-    for i, (color_frame_buffer, depth_map_buffer) in enumerate(frames):
+    def write_frame_data(i, frame_data):
+        color_frame_buffer, depth_map_buffer = frame_data
         color = read_npy(color_frame_buffer)
         color = color[:, :, :3]
         color = np.ascontiguousarray(color)
@@ -135,25 +142,83 @@ def write_frame_data_to_disk(frames, colour_dir, depth_dir, focal_length, max_de
         depth = convert_to_depth_to_plane(depth, focal_length)
         # Clip depth values.
         depth[depth > max_depth] = invalid_depth_value
-        # Normalize to [0.0, 1.0]
-        depth /= max_depth
-        # Expand values to take up uint[8|16] range and convert to uint[8|16]
-        depth = np.iinfo(dtype).max * depth
-        depth = depth.astype(dtype)
+        # Convert depth values to mm.
+        depth = 1000 * depth
+        depth = depth.astype(np.uint16)
 
-        filename = f"{i:03,d}"
-        color_path = os.path.join(colour_dir, f"{filename}.jpg")
+        filename = f"{i:06d}"
+        color_path = os.path.join(colour_dir, f"{filename}.png")
         depth_path = os.path.join(depth_dir, f"{filename}.png")
 
         print(f"Saving color and depth frame {i + 1:03,d} of {len(frames):03,d} to: {color_path} AND {depth_path}...")
         imageio.imwrite(color_path, color)
         imageio.imwrite(depth_path, depth)
 
+    pool = ThreadPool(processes=8)
+    pool.starmap(write_frame_data, list(enumerate(frames)))
 
-def main(trajectory, output_path, client_url='localhost', client_port=8888, max_depth=10.0, invalid_depth_value=0.0,
-         is_16bit_depth=True, fps=30.0, intrinsics_filename='camera.txt', trajectory_filename='trajectory.txt',
-         colour_folder='colour', depth_folder='depth'):
-    os.makedirs(output_path)
+
+def convert_unreal_trajectory(trajectory: List[str]) -> np.ndarray:
+    """
+    Convert a list of poses from UnrealCV into a single NumPy array.
+    :param trajectory: The list of 6-vector poses as a string where the first three components are the coordinates of
+        the camera, and the last components make up the Euler angles rotation of the camera.
+    :return: The converted trajectory.
+    """
+    translation_vectors = []
+    rotation_vectors = []
+
+    for line in trajectory:
+        x, y, z, pitch, yaw, roll = map(float, line.split(' '))
+        translation_vectors.append([x, y, z])
+        rotation_vectors.append([pitch, yaw, roll])
+
+    t = np.asarray(translation_vectors)
+    r = np.asarray(rotation_vectors)
+
+    return np.hstack((t, r))
+
+
+def main(output_path, client_url='localhost', client_port=8888, max_depth=10.0, invalid_depth_value=0.0,
+         fps=30.0, intrinsics_filename='camera.txt', trajectory_filename='trajectory.txt',
+         colour_folder='colour', depth_folder='depth', overwrite_ok=False):
+    trajectory = []
+
+    client = Client((client_url, client_port))
+    client.connect()
+
+    def _onkeypress(key):
+        try:
+            k = key.char  # single-char keys
+        except:
+            k = key.name  # other keys
+        # check for quit condition
+        if key == keyboard.Key.esc:
+            print("LOG INFO: Time to quit")
+            return False
+
+        if k == 'p':  # On pressing 'p', capture pose.
+            print("Capturing position!")
+            pose = client.request('vget /camera/0/pose')
+            trajectory.append(pose)
+            print("Pose: {} captured!".format(pose))
+        elif k == 'r':
+            print("Recording RGB-D sequence... Try not to move your mouse.")
+            return False
+
+        return True
+
+    keyboard_listener = keyboard.Listener(on_press=_onkeypress)
+    keyboard_listener.start()
+    keyboard_listener.join()
+
+    print(f"LOG INFO: Created trajectory of length {len(trajectory)}.")
+
+    if len(trajectory) == 0:
+        print("LOG INFO: Zero length trajectory, quitting...")
+        return
+
+    os.makedirs(output_path, exist_ok=overwrite_ok)
 
     frame_delay = 1. / fps
 
@@ -162,18 +227,17 @@ def main(trajectory, output_path, client_url='localhost', client_port=8888, max_
     print(f"Capture Frame Delay (s): {frame_delay:.4f}")
     print(f"Total Interpolated Poses: {fps * (len(trajectory) - 1)}")
 
-    translations, rotations = trajectory[:, :3], trajectory[:, 3:]
-    interpolated_trajectory = interpolate_poses(translations, rotations, frame_delay)
+    trajectory_np = convert_unreal_trajectory(trajectory)
+    interpolated_trajectory = interpolate_poses(trajectory_np, frame_delay)
 
-    fov, frames = get_frame_data(interpolated_trajectory, frame_delay, client_url, client_port)
+    fov, frames = get_frame_data(client, interpolated_trajectory, frame_delay)
+    client.disconnect()
 
-    translation_vectors = interpolated_trajectory[:, :3]
-    translation_vectors /= 100.0  # Translation units in Unreal is cm, convert it to meters to it's the same as depth.
-    rotation_vectors = Rotation.from_euler('xyz', interpolated_trajectory[:, 3:], degrees=True).as_rotvec()
-    output_trajectory = np.hstack((rotation_vectors, translation_vectors))
-    # Unreal appears to use a left-handed, z-up coordinate system.
-    # The below converts this to a left-handed, y-up coordinate system.
-    output_trajectory = output_trajectory[:, [0, 1, 2, 5, 3, 4]]
+    output_trajectory = np.hstack((
+        Rotation.from_euler('xyz', interpolated_trajectory[:, 3:], degrees=True).as_quat(),
+        # Translation units in Unreal is cm, convert it to meters to it's the same as depth.
+        interpolated_trajectory[:, :3] / 100.0
+    ))
 
     trajectory_output_file = os.path.join(output_path, trajectory_filename)
     print(f"Saving trajectory to {trajectory_output_file}...")
@@ -190,16 +254,17 @@ def main(trajectory, output_path, client_url='localhost', client_port=8888, max_
     print(f"Writing frames to {output_path}...")
     colour_dir = os.path.join(output_path, colour_folder)
     depth_dir = os.path.join(output_path, depth_folder)
-    write_frame_data_to_disk(frames, colour_dir, depth_dir, f, max_depth, invalid_depth_value)
+    write_frame_data_to_disk(frames, colour_dir, depth_dir, f, max_depth, invalid_depth_value,
+                             overwrite_ok=overwrite_ok)
 
     camera_params_file = os.path.join(output_path, intrinsics_filename)
     print(f"Saving camera intrinsics to {camera_params_file}...")
     np.savetxt(camera_params_file, K)
 
     info = UnrealDatasetInfo(width=width, height=height, num_frames=len(frames), fps=fps, max_depth=max_depth,
-                             invalid_depth_value=invalid_depth_value, is_16bit_depth=is_16bit_depth,
-                             intrinsics_filename=intrinsics_filename, trajectory_filename=trajectory_filename,
-                             colour_folder=colour_folder, depth_folder=depth_folder)
+                             invalid_depth_value=invalid_depth_value, intrinsics_filename=intrinsics_filename,
+                             trajectory_filename=trajectory_filename, colour_folder=colour_folder,
+                             depth_folder=depth_folder)
 
     info_file = os.path.join(output_path, 'info.json')
     info.save_json(info_file)
@@ -211,24 +276,25 @@ def main(trajectory, output_path, client_url='localhost', client_port=8888, max_
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--filename', default='camera-trajectory.json')
     parser.add_argument('--output_path', default='rgbd_dataset')
     parser.add_argument('--fps', default=30, type=int)
     parser.add_argument('--max_depth', help='The value the depth values are clipped to.', default=10.0, type=float)
     parser.add_argument('--invalid_depth_value', help='The value to use for clipped depth values.', default=0.0,
                         type=float)
+    parser.add_argument('--overwrite_ok', action='store_true',
+                        help='Whether to overwrite files if the output path already exists.')
 
     parser.add_argument('--client_url', default='localhost')
     parser.add_argument('--client_port', type=int, default=8888)
 
     args = parser.parse_args()
 
-    trajectory = read_trajectory(args.filename)
     output_path = args.output_path
     max_depth = args.max_depth
     invalid_depth_value = args.invalid_depth_value
     fps = args.fps
     client_url = args.client_url
     client_port = args.client_port
+    overwrite_ok = args.overwrite_ok
 
-    main(trajectory, output_path, client_url, client_port, max_depth, invalid_depth_value, fps=fps)
+    main(output_path, client_url, client_port, max_depth, invalid_depth_value, overwrite_ok=overwrite_ok, fps=fps)
