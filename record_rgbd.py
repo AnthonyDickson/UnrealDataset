@@ -245,7 +245,9 @@ def main(output_path, client_url='localhost', client_port=8888, max_depth=10.0, 
 
     height, width = read_npy(frames[0][0]).shape[:2]
     cu, cv = width / 2, height / 2
-    f = width / (2 * np.tan(fov * np.pi / 360))
+    fov_radians = fov * np.pi / 180
+    # Reference for this formula: https://purehost.bath.ac.uk/ws/portalfiles/portal/228418730/Bertel_PhD_thesis_169465296_compressed_Redacted.pdf
+    f = width / (2 * np.tan(fov_radians / 2))
 
     K = np.array([[f, 0., cu],
                   [0., f, cv],
